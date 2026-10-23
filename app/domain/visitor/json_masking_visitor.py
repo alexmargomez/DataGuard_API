@@ -1,0 +1,125 @@
+import re
+from typing import Any, Dict, List, Tuple
+from app.domain.decorators.masking_decorators import MaskingComponent
+
+
+def is_valid_luhn(card_digits: str) -> bool:
+    """Verifica matemáticamente si una secuencia de 13-19 dígitos cumple el Algoritmo de Luhn (ISO/IEC 7812)."""
+    digits = [int(d) for d in card_digits if d.isdigit()]
+    if len(digits) < 13 or len(digits) > 19:
+        return False
+    checksum = 0
+    reverse_digits = digits[::-1]
+    for i, d in enumerate(reverse_digits):
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        checksum += d
+    return checksum % 10 == 0
+
+
+class JsonTreeMaskingVisitor:
+    """
+    Visitor Pattern — Recorre recursivamente estructuras JSON arbitrarias (dict, list, str)
+    detectando y anonimizando datos personales y clínicos sensibles (Ley 1581 Habeas Data / HIPAA)
+    sin mutar el objeto original ni alterar los nombres de las propiedades.
+    """
+
+    EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+    CO_MOBILE_RE = re.compile(r"\b(?:\+57[\s-]?)?3\d{2}[\s-]?\d{3}[\s-]?\d{4}\b")
+    CREDIT_CARD_CANDIDATE_RE = re.compile(r"\b(?:\d[ -]*?){13,19}\b")
+    CO_NIT_RE = re.compile(r"\b(?:8|9)\d{2}\.?\d{3}\.?\d{3}-\d\b")
+    CO_CEDULA_RE = re.compile(r"\b(?:1\d{9}|[1-9]\d{6,7})\b")
+
+    SENSITIVE_KEY_HINTS = {
+        "cedula": "DOC_ID",
+        "documento": "DOC_ID",
+        "identificacion": "DOC_ID",
+        "nit": "NIT_CO",
+        "telefono": "PHONE_CO",
+        "celular": "PHONE_CO",
+        "phone": "PHONE_CO",
+        "email": "EMAIL",
+        "correo": "EMAIL",
+        "tarjeta": "CREDIT_CARD",
+        "card": "CREDIT_CARD",
+        "historia_clinica": "CLINICAL_RECORD",
+    }
+
+    def __init__(self, masker: MaskingComponent) -> None:
+        self._masker = masker
+        self.findings: List[Dict[str, str]] = []
+
+    def visit(self, node: Any, path: str = "$") -> Any:
+        if isinstance(node, dict):
+            return self._visit_dict(node, path)
+        if isinstance(node, list):
+            return [self.visit(item, f"{path}[{idx}]") for idx, item in enumerate(node)]
+        if isinstance(node, str):
+            return self.visit_string(node, path)
+        return node
+
+    def _visit_dict(self, data: Dict[str, Any], path: str) -> Dict[str, Any]:
+        sanitized: Dict[str, Any] = {}
+        for k, v in data.items():
+            current_path = f"{path}.{k}"
+            lower_key = k.lower().strip()
+            matched_category = None
+            for hint, cat in self.SENSITIVE_KEY_HINTS.items():
+                if hint in lower_key:
+                    matched_category = cat
+                    break
+
+            if matched_category and isinstance(v, (str, int)) and str(v).strip():
+                raw_str = str(v)
+                masked_val = self._masker.mask(matched_category, raw_str)
+                self._record_finding(current_path, matched_category, raw_str, masked_val)
+                sanitized[k] = masked_val
+            else:
+                sanitized[k] = self.visit(v, current_path)
+        return sanitized
+
+    def visit_string(self, text: str, path: str = "$.text") -> str:
+        result = text
+
+        # 1. Tarjetas de Crédito con verificación matemática de Luhn
+        for match in list(self.CREDIT_CARD_CANDIDATE_RE.finditer(result)):
+            candidate = match.group(0)
+            clean_digits = re.sub(r"\D", "", candidate)
+            if is_valid_luhn(clean_digits):
+                masked = self._masker.mask("CREDIT_CARD", clean_digits)
+                self._record_finding(path, "CREDIT_CARD", candidate, masked)
+                result = result.replace(candidate, masked, 1)
+
+        # 2. Correos electrónicos
+        result = self._replace_pattern(result, self.EMAIL_RE, "EMAIL", path)
+
+        # 3. Teléfonos celulares colombianos (+57 3xx xxx xxxx)
+        result = self._replace_pattern(result, self.CO_MOBILE_RE, "PHONE_CO", path)
+
+        # 4. NITs colombianos con formato (8xx.xxx.xxx-x / 9xx.xxx.xxx-x)
+        result = self._replace_pattern(result, self.CO_NIT_RE, "NIT_CO", path)
+
+        # 5. Cédulas de ciudadanía en texto libre
+        result = self._replace_pattern(result, self.CO_CEDULA_RE, "DOC_ID", path)
+
+        return result
+
+    def _replace_pattern(self, text: str, pattern: re.Pattern, category: str, path: str) -> str:
+        def repl(match: re.Match) -> str:
+            orig = match.group(0)
+            masked = self._masker.mask(category, orig)
+            self._record_finding(path, category, orig, masked)
+            return masked
+
+        return pattern.sub(repl, text)
+
+    def _record_finding(self, json_path: str, category: str, original: str, masked: str) -> None:
+        preview = original[:2] + "***" if len(original) > 3 else "***"
+        self.findings.append({
+            "path": json_path,
+            "category": category,
+            "originalPreview": preview,
+            "maskedResult": masked,
+        })

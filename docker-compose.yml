@@ -1,0 +1,14 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dataguard_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: "${PORT:-8087}"
+      VAULT_MASTER_SECRET: "${VAULT_MASTER_SECRET:-dataguard_ley1581_master_secret_2026}"
+    ports:
+      - "${PORT:-8087}:${PORT:-8087}"
