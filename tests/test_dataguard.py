@@ -1,4 +1,3 @@
-import base64
 import unittest
 
 from app.domain.chain.forensic_chain import audit_password_strength, execute_forensic_chain
@@ -29,6 +28,17 @@ class TestDataGuardDomain(unittest.TestCase):
         self.assertTrue(masked_cedula.startswith("VLT_DOC_ID_"))
         self.assertEqual(vault_store.get(masked_cedula), "1098765432")
 
+    def test_redaction_decorator_masks_short_5_and_6_char_secrets_and_guards_recursion(self) -> None:
+        masker = build_masker("REDACT", "secret", {})
+        self.assertEqual(masker.mask("DOC_ID", "1234"), "****")
+        self.assertEqual(masker.mask("DOC_ID", "12345"), "1***5")
+        self.assertEqual(masker.mask("DOC_ID", "123456"), "1****6")
+
+        visitor = JsonTreeMaskingVisitor(masker, max_depth=3)
+        deep_payload = {"l1": {"l2": {"l3": {"l4": {"l5": "1098765432"}}}}}
+        with self.assertRaises(ValueError):
+            visitor.visit(deep_payload)
+
     def test_forensic_chain_detects_spoofed_executable_and_polyglot_php(self) -> None:
         malicious_bytes = b"\x7fELF\x02\x01\x01\x00" + b"<?php system($_GET['cmd']); ?>"
         report = execute_forensic_chain("factura_proveedor.pdf", malicious_bytes)
@@ -55,16 +65,23 @@ class TestDataGuardDomain(unittest.TestCase):
         self.assertEqual(audit["strengthRating"], "VERY_STRONG")
         self.assertTrue(str(audit["scryptHashSample"]).startswith("scrypt$"))
 
-    def test_ttl_vault_adapter_and_privacy_use_case(self) -> None:
+    def test_ttl_vault_adapter_encrypts_in_heap_and_applies_lru(self) -> None:
         from app.application.use_cases.privacy_use_case import PrivacyMaskingUseCase
-        from app.domain.ports.vault_port import InMemoryTtlVaultAdapter
+        from app.infrastructure.persistence.in_memory_vault_adapter import InMemoryTtlVaultAdapter
 
         vault = InMemoryTtlVaultAdapter(max_capacity=2, ttl_seconds=60.0)
-        use_case = PrivacyMaskingUseCase("secret_2026", vault)
+        vault.store("VLT_DOC_ID_1", "1098765432")
+        # Verifica que en el heap interno el dato NO esté en texto claro
+        _, stored_ciphertext = vault._entries["VLT_DOC_ID_1"]
+        self.assertNotEqual(stored_ciphertext, "1098765432")
+        self.assertEqual(vault.resolve("VLT_DOC_ID_1"), "1098765432")
 
-        res = use_case.mask_json("REVERSIBLE_VAULT", {"cedula": "1098765432", "correo": "user@test.co", "celular": "+57 310 555 6677"})
+        use_case = PrivacyMaskingUseCase("secret_2026", vault)
+        res = use_case.mask_json(
+            "REVERSIBLE_VAULT",
+            {"cedula": "1098765432", "correo": "user@test.co", "celular": "+57 310 555 6677"},
+        )
         self.assertEqual(res["totalPiiDetected"], 3)
-        # Debido a max_capacity=2, solo los 2 últimos tokens permanecen en la bóveda LRU
         self.assertEqual(use_case.vault_size, 2)
 
 

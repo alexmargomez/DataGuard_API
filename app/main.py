@@ -1,15 +1,15 @@
+import asyncio
 import base64
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 from app.application.use_cases.privacy_use_case import PrivacyMaskingUseCase
 from app.domain.chain.forensic_chain import audit_password_strength, execute_forensic_chain
-from app.domain.ports.vault_port import InMemoryTtlVaultAdapter
 from app.infrastructure.http.schemas import (
     InspectBase64FileRequest,
     MaskJsonRequest,
@@ -17,6 +17,9 @@ from app.infrastructure.http.schemas import (
     PasswordAuditRequest,
     UnmaskVaultRequest,
 )
+from app.infrastructure.persistence.in_memory_vault_adapter import InMemoryTtlVaultAdapter
+
+MAX_FORENSIC_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
 
 app = FastAPI(
     title="DataGuard API — Motor de Privacidad (Habeas Data Ley 1581) & Forense Binario",
@@ -36,7 +39,12 @@ app.add_middleware(
 )
 
 VAULT_SECRET = os.getenv("VAULT_MASTER_SECRET", "dataguard_ley1581_master_secret_2026")
-VAULT_ADAPTER = InMemoryTtlVaultAdapter(max_capacity=5000, ttl_seconds=3600.0)
+VAULT_API_KEY = os.getenv("VAULT_UNMASK_API_KEY", "").strip()
+VAULT_ADAPTER = InMemoryTtlVaultAdapter(
+    max_capacity=5000,
+    ttl_seconds=3600.0,
+    encryption_secret=VAULT_SECRET,
+)
 PRIVACY_USE_CASE = PrivacyMaskingUseCase(vault_secret=VAULT_SECRET, vault_port=VAULT_ADAPTER)
 
 
@@ -61,7 +69,7 @@ async def health() -> Dict[str, Any]:
     return {
         "status": "UP",
         "service": "DataGuard API (Python 3.12 + FastAPI + Pydantic v2)",
-        "architecture": "Hexagonal Rule Engine (Visitor + Decorator + Chain of Responsibility + TokenVaultPort TTL)",
+        "architecture": "Hexagonal Rule Engine (Visitor + Decorator + Chain of Responsibility + Encrypted TokenVaultPort TTL)",
         "vaultTokensStored": PRIVACY_USE_CASE.vault_size,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -69,7 +77,10 @@ async def health() -> Dict[str, Any]:
 
 @app.post("/api/v1/privacy/mask-json", tags=["2. Privacidad & Habeas Data (Ley 1581)"])
 async def mask_json_payload(req: MaskJsonRequest) -> Dict[str, Any]:
-    return PRIVACY_USE_CASE.mask_json(req.mode, req.payload)
+    try:
+        return PRIVACY_USE_CASE.mask_json(req.mode, req.payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/privacy/mask-text", tags=["2. Privacidad & Habeas Data (Ley 1581)"])
@@ -78,7 +89,12 @@ async def mask_free_text(req: MaskTextRequest) -> Dict[str, Any]:
 
 
 @app.post("/api/v1/privacy/unmask", tags=["2. Privacidad & Habeas Data (Ley 1581)"])
-async def unmask_vault_tokens(req: UnmaskVaultRequest) -> Dict[str, Any]:
+async def unmask_vault_tokens(
+    req: UnmaskVaultRequest,
+    x_vault_key: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    if VAULT_API_KEY and x_vault_key != VAULT_API_KEY:
+        raise HTTPException(status_code=403, detail="X-Vault-Key inválida o ausente para revertir tokens PII.")
     return PRIVACY_USE_CASE.unmask_tokens(req.tokens)
 
 
@@ -88,15 +104,19 @@ async def inspect_base64_file(req: InspectBase64FileRequest) -> Dict[str, Any]:
         raw_bytes = base64.b64decode(req.base64Content)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Base64 inválido: {exc}") from exc
-    return execute_forensic_chain(req.filename, raw_bytes)
+    if len(raw_bytes) > MAX_FORENSIC_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="El archivo supera el límite máximo forense de 15 MB.")
+    return await asyncio.to_thread(execute_forensic_chain, req.filename, raw_bytes)
 
 
 @app.post("/api/v1/forensics/inspect-upload", tags=["3. Inspección Forense Binaria (Magic Bytes)"])
 async def inspect_uploaded_file(file: UploadFile = File(...)) -> Dict[str, Any]:
-    raw_bytes = await file.read()
-    return execute_forensic_chain(file.filename or "upload.bin", raw_bytes)
+    raw_bytes = await file.read(MAX_FORENSIC_UPLOAD_BYTES + 1)
+    if len(raw_bytes) > MAX_FORENSIC_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="El archivo subido supera el límite máximo de 15 MB.")
+    return await asyncio.to_thread(execute_forensic_chain, file.filename or "upload.bin", raw_bytes)
 
 
 @app.post("/api/v1/crypto/password-audit", tags=["4. Auditoría Criptográfica"])
 async def password_audit(req: PasswordAuditRequest) -> Dict[str, Any]:
-    return audit_password_strength(req.password)
+    return await asyncio.to_thread(audit_password_strength, req.password)
