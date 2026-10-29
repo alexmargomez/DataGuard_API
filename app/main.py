@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hmac
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -93,8 +94,11 @@ async def unmask_vault_tokens(
     req: UnmaskVaultRequest,
     x_vault_key: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
-    if VAULT_API_KEY and x_vault_key != VAULT_API_KEY:
-        raise HTTPException(status_code=403, detail="X-Vault-Key inválida o ausente para revertir tokens PII.")
+    if not VAULT_API_KEY or not x_vault_key or not hmac.compare_digest(x_vault_key, VAULT_API_KEY):
+        raise HTTPException(
+            status_code=403,
+            detail="Acceso denegado (Fail-Closed): X-Vault-Key inválida o VAULT_UNMASK_API_KEY no configurada.",
+        )
     return PRIVACY_USE_CASE.unmask_tokens(req.tokens)
 
 

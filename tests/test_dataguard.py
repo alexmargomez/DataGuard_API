@@ -71,10 +71,17 @@ class TestDataGuardDomain(unittest.TestCase):
 
         vault = InMemoryTtlVaultAdapter(max_capacity=2, ttl_seconds=60.0)
         vault.store("VLT_DOC_ID_1", "1098765432")
-        # Verifica que en el heap interno el dato NO esté en texto claro
-        _, stored_ciphertext = vault._entries["VLT_DOC_ID_1"]
+        # Verifica que en el heap interno el dato NO esté en texto claro y tenga etiqueta MAC
+        exp, stored_ciphertext = vault._entries["VLT_DOC_ID_1"]
         self.assertNotEqual(stored_ciphertext, "1098765432")
+        self.assertIn(".", stored_ciphertext)
         self.assertEqual(vault.resolve("VLT_DOC_ID_1"), "1098765432")
+
+        # Si se altera la etiqueta MAC en memoria, resolve() debe detectar la violación de integridad
+        vault._entries["VLT_DOC_ID_1"] = (exp, stored_ciphertext[:-4] + "0000")
+        with self.assertRaises(ValueError):
+            vault.resolve("VLT_DOC_ID_1")
+        vault.store("VLT_DOC_ID_1", "1098765432")
 
         use_case = PrivacyMaskingUseCase("secret_2026", vault)
         res = use_case.mask_json(

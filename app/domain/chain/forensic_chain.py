@@ -160,6 +160,18 @@ class ShannonEntropyInspector(ForensicHandler):
         })
 
 
+def _build_default_forensic_chain() -> ForensicHandler:
+    step1 = MagicBytesSignatureInspector()
+    step2 = ExtensionMismatchInspector()
+    step3 = PolyglotPayloadInspector()
+    step4 = ShannonEntropyInspector()
+    step1.set_next(step2).set_next(step3).set_next(step4)
+    return step1
+
+
+_DEFAULT_FORENSIC_CHAIN: ForensicHandler = _build_default_forensic_chain()
+
+
 def execute_forensic_chain(filename: str, raw_bytes: bytes) -> Dict[str, object]:
     _, ext = os.path.splitext(filename or "sample.bin")
     ctx = ForensicInspectionContext(
@@ -169,13 +181,7 @@ def execute_forensic_chain(filename: str, raw_bytes: bytes) -> Dict[str, object]
         raw_bytes=raw_bytes,
     )
 
-    step1 = MagicBytesSignatureInspector()
-    step2 = ExtensionMismatchInspector()
-    step3 = PolyglotPayloadInspector()
-    step4 = ShannonEntropyInspector()
-    step1.set_next(step2).set_next(step3).set_next(step4)
-
-    step1.handle(ctx)
+    _DEFAULT_FORENSIC_CHAIN.handle(ctx)
 
     return {
         "filename": ctx.filename,
