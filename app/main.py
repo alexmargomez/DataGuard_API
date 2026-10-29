@@ -1,23 +1,29 @@
 import base64
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
 
+from app.application.use_cases.privacy_use_case import PrivacyMaskingUseCase
 from app.domain.chain.forensic_chain import audit_password_strength, execute_forensic_chain
-from app.domain.decorators.masking_decorators import build_masker
-from app.domain.visitor.json_masking_visitor import JsonTreeMaskingVisitor
+from app.domain.ports.vault_port import InMemoryTtlVaultAdapter
+from app.infrastructure.http.schemas import (
+    InspectBase64FileRequest,
+    MaskJsonRequest,
+    MaskTextRequest,
+    PasswordAuditRequest,
+    UnmaskVaultRequest,
+)
 
 app = FastAPI(
     title="DataGuard API — Motor de Privacidad (Habeas Data Ley 1581) & Forense Binario",
     version="1.0.0",
     description=(
         "Microservicio 100% Backend en Python 3.12 + FastAPI + Pydantic v2 para anonimización recursiva "
-        "de datos personales/clínicos (Visitor + Decorator Patterns) e inspección forense de archivos "
+        "de datos personales/clínicos (Visitor + Decorator Patterns + TokenVaultPort TTL) e inspección forense de archivos "
         "binarios por Magic Bytes y Entropía de Shannon (Chain of Responsibility Pattern)."
     ),
 )
@@ -30,36 +36,8 @@ app.add_middleware(
 )
 
 VAULT_SECRET = os.getenv("VAULT_MASTER_SECRET", "dataguard_ley1581_master_secret_2026")
-REVERSIBLE_VAULT_STORE: Dict[str, str] = {}
-
-
-class MaskJsonRequest(BaseModel):
-    mode: str = Field(
-        default="REDACT",
-        description="Estrategia Decorator: REDACT | DETERMINISTIC_TOKEN | REVERSIBLE_VAULT",
-    )
-    payload: Any = Field(
-        ...,
-        description="Objeto JSON o estructura anidada con datos sensibles (cédulas, NITs, celulares, tarjetas, emails)",
-    )
-
-
-class MaskTextRequest(BaseModel):
-    mode: str = Field(default="REDACT", description="REDACT | DETERMINISTIC_TOKEN | REVERSIBLE_VAULT")
-    text: str = Field(..., description="Texto libre, log de servidor o nota clínica a sanitizar")
-
-
-class UnmaskVaultRequest(BaseModel):
-    tokens: List[str] = Field(..., description="Lista de tokens VLT_* generados en modo REVERSIBLE_VAULT")
-
-
-class InspectBase64FileRequest(BaseModel):
-    filename: str = Field(default="documento_sospechoso.pdf")
-    base64Content: str = Field(..., description="Contenido binario del archivo codificado en Base64")
-
-
-class PasswordAuditRequest(BaseModel):
-    password: str = Field(..., min_length=1)
+VAULT_ADAPTER = InMemoryTtlVaultAdapter(max_capacity=5000, ttl_seconds=3600.0)
+PRIVACY_USE_CASE = PrivacyMaskingUseCase(vault_secret=VAULT_SECRET, vault_port=VAULT_ADAPTER)
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -83,48 +61,25 @@ async def health() -> Dict[str, Any]:
     return {
         "status": "UP",
         "service": "DataGuard API (Python 3.12 + FastAPI + Pydantic v2)",
-        "architecture": "Hexagonal Rule Engine (Visitor + Decorator + Chain of Responsibility)",
-        "vaultTokensStored": len(REVERSIBLE_VAULT_STORE),
+        "architecture": "Hexagonal Rule Engine (Visitor + Decorator + Chain of Responsibility + TokenVaultPort TTL)",
+        "vaultTokensStored": PRIVACY_USE_CASE.vault_size,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
 @app.post("/api/v1/privacy/mask-json", tags=["2. Privacidad & Habeas Data (Ley 1581)"])
 async def mask_json_payload(req: MaskJsonRequest) -> Dict[str, Any]:
-    masker = build_masker(req.mode, VAULT_SECRET, REVERSIBLE_VAULT_STORE)
-    visitor = JsonTreeMaskingVisitor(masker)
-    sanitized = visitor.visit(req.payload)
-    return {
-        "complianceStandard": "Ley 1581 de 2012 (Habeas Data Colombia) / HIPAA Safe Harbor",
-        "strategyApplied": req.mode.upper(),
-        "totalPiiDetected": len(visitor.findings),
-        "sanitizedPayload": sanitized,
-        "auditFindings": visitor.findings,
-    }
+    return PRIVACY_USE_CASE.mask_json(req.mode, req.payload)
 
 
 @app.post("/api/v1/privacy/mask-text", tags=["2. Privacidad & Habeas Data (Ley 1581)"])
 async def mask_free_text(req: MaskTextRequest) -> Dict[str, Any]:
-    masker = build_masker(req.mode, VAULT_SECRET, REVERSIBLE_VAULT_STORE)
-    visitor = JsonTreeMaskingVisitor(masker)
-    sanitized_text = visitor.visit_string(req.text)
-    return {
-        "strategyApplied": req.mode.upper(),
-        "totalPiiDetected": len(visitor.findings),
-        "sanitizedText": sanitized_text,
-        "auditFindings": visitor.findings,
-    }
+    return PRIVACY_USE_CASE.mask_text(req.mode, req.text)
 
 
 @app.post("/api/v1/privacy/unmask", tags=["2. Privacidad & Habeas Data (Ley 1581)"])
 async def unmask_vault_tokens(req: UnmaskVaultRequest) -> Dict[str, Any]:
-    resolved: Dict[str, Optional[str]] = {}
-    for tkn in req.tokens:
-        resolved[tkn] = REVERSIBLE_VAULT_STORE.get(tkn)
-    return {
-        "requestedCount": len(req.tokens),
-        "resolved": resolved,
-    }
+    return PRIVACY_USE_CASE.unmask_tokens(req.tokens)
 
 
 @app.post("/api/v1/forensics/inspect-base64", tags=["3. Inspección Forense Binaria (Magic Bytes)"])

@@ -55,6 +55,18 @@ class TestDataGuardDomain(unittest.TestCase):
         self.assertEqual(audit["strengthRating"], "VERY_STRONG")
         self.assertTrue(str(audit["scryptHashSample"]).startswith("scrypt$"))
 
+    def test_ttl_vault_adapter_and_privacy_use_case(self) -> None:
+        from app.application.use_cases.privacy_use_case import PrivacyMaskingUseCase
+        from app.domain.ports.vault_port import InMemoryTtlVaultAdapter
+
+        vault = InMemoryTtlVaultAdapter(max_capacity=2, ttl_seconds=60.0)
+        use_case = PrivacyMaskingUseCase("secret_2026", vault)
+
+        res = use_case.mask_json("REVERSIBLE_VAULT", {"cedula": "1098765432", "correo": "user@test.co", "celular": "+57 310 555 6677"})
+        self.assertEqual(res["totalPiiDetected"], 3)
+        # Debido a max_capacity=2, solo los 2 últimos tokens permanecen en la bóveda LRU
+        self.assertEqual(use_case.vault_size, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
