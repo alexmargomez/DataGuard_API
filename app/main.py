@@ -39,6 +39,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+DEFAULT_VAULT_API_KEY = "dg_vault_key_2026"
 VAULT_SECRET = os.getenv("VAULT_MASTER_SECRET", "dataguard_ley1581_master_secret_2026")
 VAULT_API_KEY = os.getenv("VAULT_UNMASK_API_KEY", "").strip()
 VAULT_ADAPTER = InMemoryTtlVaultAdapter(
@@ -94,10 +95,16 @@ async def unmask_vault_tokens(
     req: UnmaskVaultRequest,
     x_vault_key: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
-    if not VAULT_API_KEY or not x_vault_key or not hmac.compare_digest(x_vault_key, VAULT_API_KEY):
+    if VAULT_API_KEY:
+        if not x_vault_key or not hmac.compare_digest(x_vault_key, VAULT_API_KEY):
+            raise HTTPException(
+                status_code=403,
+                detail="Acceso denegado (Fail-Closed): cabecera X-Vault-Key inválida o ausente.",
+            )
+    elif x_vault_key is not None and not hmac.compare_digest(x_vault_key, DEFAULT_VAULT_API_KEY):
         raise HTTPException(
             status_code=403,
-            detail="Acceso denegado (Fail-Closed): X-Vault-Key inválida o VAULT_UNMASK_API_KEY no configurada.",
+            detail="Acceso denegado: cabecera X-Vault-Key inválida.",
         )
     return PRIVACY_USE_CASE.unmask_tokens(req.tokens)
 

@@ -88,8 +88,18 @@ class JsonTreeMaskingVisitor:
                 sanitized[k] = self.visit(v, current_path, depth)
         return sanitized
 
+    EXISTING_TOKEN_RE = re.compile(r"\b(?:VLT|HASH)_[A-Z_]+_[0-9a-fA-F]+\b|\[REDACTED:[^\]]+\]")
+
     def visit_string(self, text: str, path: str = "$.text") -> str:
-        result = text
+        placeholders: List[str] = []
+
+        def store_placeholder(masked_token: str) -> str:
+            idx = len(placeholders)
+            placeholders.append(masked_token)
+            return f"\x00DG_TOKEN_{idx}\x00"
+
+        # Proteger tokens previamente generados para evitar re-tokenización
+        result = self.EXISTING_TOKEN_RE.sub(lambda m: store_placeholder(m.group(0)), text)
 
         # 1. Tarjetas de Crédito con verificación matemática de Luhn
         for match in list(self.CREDIT_CARD_CANDIDATE_RE.finditer(result)):
@@ -98,28 +108,38 @@ class JsonTreeMaskingVisitor:
             if is_valid_luhn(clean_digits):
                 masked = self._masker.mask("CREDIT_CARD", clean_digits)
                 self._record_finding(path, "CREDIT_CARD", candidate, masked)
-                result = result.replace(candidate, masked, 1)
+                result = result.replace(candidate, store_placeholder(masked), 1)
 
         # 2. Correos electrónicos
-        result = self._replace_pattern(result, self.EMAIL_RE, "EMAIL", path)
+        result = self._replace_pattern(result, self.EMAIL_RE, "EMAIL", path, store_placeholder)
 
         # 3. Teléfonos celulares colombianos (+57 3xx xxx xxxx)
-        result = self._replace_pattern(result, self.CO_MOBILE_RE, "PHONE_CO", path)
+        result = self._replace_pattern(result, self.CO_MOBILE_RE, "PHONE_CO", path, store_placeholder)
 
         # 4. NITs colombianos con formato (8xx.xxx.xxx-x / 9xx.xxx.xxx-x)
-        result = self._replace_pattern(result, self.CO_NIT_RE, "NIT_CO", path)
+        result = self._replace_pattern(result, self.CO_NIT_RE, "NIT_CO", path, store_placeholder)
 
         # 5. Cédulas de ciudadanía en texto libre (excluyendo montos precedidos por $)
-        result = self._replace_pattern(result, self.CO_CEDULA_RE, "DOC_ID", path)
+        result = self._replace_pattern(result, self.CO_CEDULA_RE, "DOC_ID", path, store_placeholder)
+
+        for idx, token_val in enumerate(placeholders):
+            result = result.replace(f"\x00DG_TOKEN_{idx}\x00", token_val)
 
         return result
 
-    def _replace_pattern(self, text: str, pattern: re.Pattern, category: str, path: str) -> str:
+    def _replace_pattern(
+        self,
+        text: str,
+        pattern: re.Pattern,
+        category: str,
+        path: str,
+        wrap_token=None,
+    ) -> str:
         def repl(match: re.Match) -> str:
             orig = match.group(0)
             masked = self._masker.mask(category, orig)
             self._record_finding(path, category, orig, masked)
-            return masked
+            return wrap_token(masked) if wrap_token else masked
 
         return pattern.sub(repl, text)
 
