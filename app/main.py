@@ -95,8 +95,9 @@ async def unmask_vault_tokens(
     req: UnmaskVaultRequest,
     x_vault_key: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
-    if VAULT_API_KEY:
-        if not x_vault_key or not hmac.compare_digest(x_vault_key, VAULT_API_KEY):
+    configured_vault_key = os.getenv("VAULT_UNMASK_API_KEY", VAULT_API_KEY).strip()
+    if configured_vault_key:
+        if not x_vault_key or not hmac.compare_digest(x_vault_key, configured_vault_key):
             raise HTTPException(
                 status_code=403,
                 detail="Acceso denegado (Fail-Closed): cabecera X-Vault-Key inválida o ausente.",
